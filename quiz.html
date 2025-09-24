@@ -1,0 +1,312 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Major Scales Quiz</title>
+<style>
+  body {
+    font-family: sans-serif;
+    text-align: center;
+    background: #fdfdfdfd;
+    margin: 0; padding: 20px;
+    -webkit-user-select: none;
+    touch-action: manipulation;
+  }
+  h1 { margin: 0 0 5px 0; }
+  .question { font-size: 1.5em; margin: 20px 0; }
+  .options { display: flex; justify-content: center; flex-wrap: wrap; margin: 10px 0; }
+  .options label {
+    margin: 5px 10px;
+    cursor: pointer;
+    font-size: 1.2em;
+  }
+  input[type="radio"] { display: none; }
+  input[type="radio"] + span {
+    display: inline-block;
+    padding: 12px 18px;
+    border: 2px solid #333;
+    border-radius: 25px;
+    font-size: 18px; /* prevents iOS auto-zoom */
+  }
+  input[type="radio"]:checked + span {
+    background: #333;
+    color: #fff;
+  }
+  #topbar { display: flex; justify-content: center; gap: 12px; align-items: center; flex-wrap: wrap; }
+  #timer, #score { font-size: 1.1em; }
+  #end { display: none; margin-top: 20px; font-size: 1.1em; }
+  #end .stars { font-size: 2em; margin: 8px 0; color: gold; }
+  #end ol { text-align: left; display: inline-block; margin: 8px auto 0; padding-left: 20px; }
+  #replay {
+    margin-top: 16px;
+    padding: 12px 24px;
+    font-size: 1.1em;
+    border: 2px solid #333;
+    border-radius: 8px;
+    background: #333;
+    color: white;
+    cursor: pointer;
+  }
+  #changeName {
+    padding: 8px 14px;
+    font-size: 0.95em;
+    border: 2px solid #333;
+    border-radius: 8px;
+    background: #fff;
+    color: #333;
+    cursor: pointer;
+  }
+</style>
+</head>
+<body>
+  <h1>Major Scales Quiz</h1>
+  <div id="topbar">
+    <button id="changeName" onclick="resetName()">Change Name</button>
+    <div id="timer">Time: 30</div>
+    <div id="score">Score: 0</div>
+  </div>
+
+  <div id="quiz">
+    <div class="question" id="question"></div>
+    <div class="options" id="numberOptions"></div>
+    <div class="options" id="typeOptions"></div>
+  </div>
+
+  <div id="end"></div>
+
+<script>
+/* ------------------ Data ------------------ */
+const scales = {
+  "C":  {acc:0,type:null},
+  "G":  {acc:1,type:"sharps"},
+  "D":  {acc:2,type:"sharps"},
+  "A":  {acc:3,type:"sharps"},
+  "E":  {acc:4,type:"sharps"},
+  "B":  {acc:5,type:"sharps"},
+  "F#": {acc:6,type:"sharps"},
+  "C#": {acc:7,type:"sharps"},
+  "F":  {acc:1,type:"flats"},
+  "Bb": {acc:2,type:"flats"},
+  "Eb": {acc:3,type:"flats"},
+  "Ab": {acc:4,type:"flats"},
+  "Db": {acc:5,type:"flats"},
+  "Gb": {acc:6,type:"flats"},
+  "Cb": {acc:7,type:"flats"}
+};
+
+// 🔗 Replace with your Apps Script Web App URL:
+const LEADERBOARD_URL = "https://script.google.com/macros/s/AKfycbwgHRiMYO-RThwHJxq5fcd6_mCvjQtf52sNML1UxDsnp7khnftEdP8CPkhKF2xX0FAW/exec";
+
+/* ------------------ State ------------------ */
+let score=0, time=30, timer, currentScale;
+let chosenNumber=null, chosenType=null;
+let playerName = "";
+
+// Avoid repeats in the last N questions
+const HISTORY_LIMIT = 3;
+let recentScales = [];
+
+// Prefetched leaderboard cache
+let prefetchedTop = null;
+
+/* ------------------ Elements ------------------ */
+const questionDiv      = document.getElementById("question");
+const numberOptionsDiv = document.getElementById("numberOptions");
+const typeOptionsDiv   = document.getElementById("typeOptions");
+const timerDiv         = document.getElementById("timer");
+const scoreDiv         = document.getElementById("score");
+const endDiv           = document.getElementById("end");
+
+/* ------------------ Helpers ------------------ */
+function starCountForScore(s){
+  if(s>=50) return 5;
+  if(s>=40) return 4;
+  if(s>=30) return 3;
+  if(s>=20) return 2;
+  if(s>=10) return 1;
+  return 0;
+}
+function renderStars(n){
+  return n>0 ? "⭐".repeat(n) : "No stars";
+}
+function formatLeaderboard(rows){
+  // rows: [[name, score, date] ...] OR [[name, score] ...]
+  const bestByName = new Map();
+  for(const r of rows){
+    const name = String((r[0] ?? "Anonymous")).trim() || "Anonymous";
+    const scr  = Number(r[1] ?? 0);
+    if(!bestByName.has(name) || scr > bestByName.get(name)){
+      bestByName.set(name, scr);
+    }
+  }
+  const deduped = Array.from(bestByName.entries())
+    .map(([n,s]) => ({name:n, score:s}))
+    .sort((a,b)=> b.score - a.score)
+    .slice(0,10);
+
+  return deduped.map((entry, idx)=>{
+    const isMe = playerName && entry.name.toLowerCase() === playerName.toLowerCase();
+    const rank = idx+1;
+    return `<li>${rank}. ${isMe ? "<strong>"+entry.name+"</strong>" : entry.name} — ${entry.score}</li>`;
+  }).join("");
+}
+
+/* ------------------ Leaderboard Prefetch ------------------ */
+function prefetchLeaderboard(){
+  fetch(LEADERBOARD_URL)
+    .then(r=>r.json())
+    .then(rows=>{ prefetchedTop = rows; })
+    .catch(()=>{ prefetchedTop = null; });
+}
+
+/* ------------------ Game Flow ------------------ */
+function startQuiz(){
+  // Load or ask name once
+  if (!playerName){
+    playerName = localStorage.getItem("scaleQuizName");
+    if (!playerName){
+      playerName = prompt("Enter your name:") || "Anonymous";
+      localStorage.setItem("scaleQuizName", playerName);
+    }
+  }
+
+  score=0; time=30;
+  scoreDiv.innerText = "Score: 0";
+  timerDiv.innerText = "Time: 30";
+  endDiv.style.display = "none";
+  document.getElementById("quiz").style.display = "block";
+
+  // Prefetch leaderboard at game start
+  prefetchLeaderboard();
+
+  newQuestion();
+  clearInterval(timer);
+  timer = setInterval(()=>{
+    time--;
+    timerDiv.innerText = "Time: " + time;
+    if(time<=0){ endQuiz(); }
+  }, 1000);
+}
+
+function newQuestion(){
+  chosenNumber=null; chosenType=null;
+  numberOptionsDiv.innerHTML="";
+  typeOptionsDiv.innerHTML="";
+
+  const keys = Object.keys(scales);
+  let nextScale;
+  do {
+    nextScale = keys[Math.floor(Math.random()*keys.length)];
+  } while(recentScales.includes(nextScale));
+
+  recentScales.push(nextScale);
+  if(recentScales.length > HISTORY_LIMIT) recentScales.shift();
+
+  currentScale = nextScale;
+  questionDiv.innerText = "Scale: " + currentScale;
+
+  // # accidentals 0–7
+  for(let i=0;i<=7;i++){
+    const id="num"+i;
+    numberOptionsDiv.innerHTML +=
+      `<label><input type="radio" name="num" id="${id}" value="${i}">
+       <span>${i}</span></label>`;
+  }
+
+  // flats first, then sharps (always visible)
+  ["flats","sharps"].forEach(type=>{
+    const id="type"+type;
+    typeOptionsDiv.innerHTML +=
+      `<label><input type="radio" name="type" id="${id}" value="${type}">
+       <span>${type}</span></label>`;
+  });
+
+  document.querySelectorAll('input[name="num"]').forEach(el=>{
+    el.onchange = ()=>{
+      chosenNumber = parseInt(el.value,10);
+      checkAnswer();
+    };
+  });
+  document.querySelectorAll('input[name="type"]').forEach(el=>{
+    el.onchange = ()=>{
+      chosenType = el.value;
+      checkAnswer();
+    };
+  });
+}
+
+function checkAnswer(){
+  const answer = scales[currentScale];
+
+  if(answer.acc===0){
+    // C major: only need "0"
+    if(chosenNumber===0){
+      score++;
+      scoreDiv.innerText="Score: "+score;
+      setTimeout(newQuestion, 50);
+    }
+  } else if(chosenNumber!==null && chosenType!==null){
+    if(answer.acc===chosenNumber && answer.type===chosenType){
+      score++;
+      scoreDiv.innerText="Score: "+score;
+    }
+    setTimeout(newQuestion, 50);
+  }
+}
+
+function endQuiz(){
+  clearInterval(timer);
+  document.getElementById("quiz").style.display = "none";
+
+  const stars = starCountForScore(score);
+
+  // Show results immediately
+  endDiv.style.display = "block";
+  endDiv.innerHTML = `
+    <div>Your score: ${score}</div>
+    <div class="stars">${renderStars(stars)}</div>
+    <div>Star Criteria:<br>
+      10 = ★, 20 = ★★, 30 = ★★★, 40 = ★★★★, 50 = ★★★★★
+    </div>
+    <h3>Leaderboard</h3>
+    <ol id="lb">${
+      prefetchedTop ? formatLeaderboard(prefetchedTop) : "<li>Loading leaderboard...</li>"
+    }</ol>
+    <button id="replay">Play Again</button>
+  `;
+  document.getElementById("replay").onclick = startQuiz;
+
+  // Fire-and-forget POST (don’t block UI)
+  try {
+    fetch(LEADERBOARD_URL, {
+      method: "POST",
+      body: JSON.stringify({ name: playerName || "Anonymous", score: score })
+    });
+  } catch(e){ /* ignore */ }
+
+  // Refresh leaderboard asynchronously (could include our new score)
+  fetch(LEADERBOARD_URL)
+    .then(res => res.json())
+    .then(top => {
+      const lb = document.getElementById("lb");
+      if(lb) lb.innerHTML = formatLeaderboard(top) || "<li>No scores yet</li>";
+    })
+    .catch(() => {
+      const lb = document.getElementById("lb");
+      if(lb) lb.innerHTML = "<li>Could not load leaderboard</li>";
+    });
+}
+
+/* ------------------ Utilities ------------------ */
+function resetName(){
+  localStorage.removeItem("scaleQuizName");
+  playerName = "";
+  alert("Name reset. You will be asked again next game.");
+}
+
+/* ------------------ Kickoff ------------------ */
+startQuiz();
+</script>
+</body>
+</html>
